@@ -5,7 +5,7 @@ import random
 import numpy as np
 import math
 
-from carla.transform import Transform, Rotation, Scale
+from carla import Transform, Rotation, Scale
 
 
 def make_carla_settings(args):

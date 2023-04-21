@@ -13,7 +13,7 @@ VISIBLE_VERTEX_COLOR = (0, 255, 0)
 # How many meters the car must drive before a new capture is triggered.
 DISTANCE_SINCE_LAST_RECORDING = 10
 # How many datapoints to record before resetting the scene.
-NUM_RECORDINGS_BEFORE_RESET = 20
+NUM_RECORDINGS_BEFORE_RESET = 500
 # How many frames to render before resetting the environment
 # For example, the agent may be stuck
 NUM_EMPTY_FRAMES_BEFORE_RESET = 100
@@ -26,7 +26,7 @@ MIN_BBOX_AREA_IN_PX = 100
 
 """ AGENT SETTINGS """
 NUM_VEHICLES = 20
-NUM_PEDESTRIANS = 10
+NUM_PEDESTRIANS = 20
 
 """ RENDERING SETTINGS """
 WINDOW_WIDTH = 1248

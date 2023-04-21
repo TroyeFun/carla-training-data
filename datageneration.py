@@ -27,7 +27,6 @@ STARTING in a moment...
 """
 
 import argparse
-import cv2
 import logging
 import random
 import time
@@ -48,11 +47,14 @@ except ImportError:
     raise RuntimeError(
         'cannot import numpy, make sure numpy package is installed')
 
-from carla import image_converter
-from carla.client import make_carla_client, VehicleControl
-from carla.planner.map import CarlaMap
-from carla.tcp import TCPConnectionError
-from carla.transform import Transform, Scale
+import carla
+# from carla import image_converter
+from carla import ColorConverter as cc
+# from carla.planner.map import CarlaMap
+# from carla.tcp import TCPConnectionError
+# from carla.transform import Transform, Scale
+from carla import Transform
+from carla import WeatherParameters as wp
 
 from utils import Timer, rand_color, vector3d_to_array, degrees_to_radians
 from datadescriptor import KittiDescriptor
@@ -60,7 +62,7 @@ from dataexport import *
 from bounding_box import create_kitti_datapoint
 from carla_utils import KeyboardHelper, MeasurementsDisplayHelper
 from constants import *
-from settings import make_carla_settings
+# from settings import make_carla_settings
 import lidar_utils  # from lidar_utils import project_point_cloud
 import time
 from math import cos, sin
@@ -69,6 +71,13 @@ from math import cos, sin
 PHASE = "training"
 OUTPUT_FOLDER = os.path.join("_out", PHASE)
 folders = ['calib', 'image_2', 'label_2', 'velodyne', 'planes']
+weathers = [wp.ClearNight, wp.ClearNoon, wp.ClearSunset,
+            wp.CloudyNight, wp.CloudyNoon, wp.CloudySunset,
+            wp.WetNight, wp.WetNoon, wp.WetSunset,
+            wp.WetCloudyNight, wp.WetCloudyNoon, wp.WetCloudySunset,
+            wp.MidRainyNight, wp.MidRainyNoon, wp.MidRainySunset,
+            wp.HardRainyNight, wp.HardRainyNoon, wp.HardRainySunset,
+            wp.SoftRainyNight, wp.SoftRainyNoon, wp.SoftRainySunset]
 
 
 def maybe_create_dir(path):
@@ -91,8 +100,8 @@ CALIBRATION_PATH = os.path.join(OUTPUT_FOLDER, 'calib/{0:06}.txt')
 class CarlaGame(object):
     def __init__(self, carla_client, args):
         self.client = carla_client
-        self._carla_settings, self._intrinsic, self._camera_to_car_transform, self._lidar_to_car_transform = make_carla_settings(
-            args)
+        # self._carla_settings, self._intrinsic, self._camera_to_car_transform, self._lidar_to_car_transform = make_carla_settings(
+        #     args)
         self._timer = None
         self._display = None
         self._main_image = None
@@ -103,11 +112,10 @@ class CarlaGame(object):
         self._map_view = None
         self._is_on_reverse = False
         self._city_name = args.map_name
-        self._map = CarlaMap(self._city_name, 16.43,
-                             50.0) if self._city_name is not None else None
-        self._map_shape = self._map.map_image.shape if self._city_name is not None else None
-        self._map_view = self._map.get_map(
-            WINDOW_HEIGHT) if self._city_name is not None else None
+        # self._map = self._world.get_map()
+        # self._map_shape = self._map.map_image.shape if self._city_name is not None else None
+        # self._map_view = self._map.get_map(
+        #     WINDOW_HEIGHT) if self._city_name is not None else None
         self._position = None
         self._agent_positions = None
         self.captured_frame_no = self.current_captured_frame_num()
@@ -118,6 +126,66 @@ class CarlaGame(object):
         self._frames_since_last_capture = 0
         # How many frames we have captured since reset
         self._captured_frames_since_restart = 0
+        self._reset_world()
+
+    def _reset_world(self):
+        # TODO: random set city
+        self._world = self.client.load_world(self._city_name)
+        settings = self._world.get_settings()
+        settings.synchronous_mode = True
+        settings.fixed_delta_seconds = 0.1
+        self._world.apply_settings(settings)
+
+        # set weather
+        weather = random.choice(weathers)
+        self._world.set_weather(weather)
+
+        # set traffic
+        bplib = self._world.get_blueprint_library()
+        vehicle_bps = random.sample(bplib.filter('vehicle'), NUM_VEHICLES)
+        transforms = random.sample(self._world.get_map().get_spawn_points(), NUM_VEHICLES)
+        vehicles = []
+        for vehicle, transform in zip(vehicle_bps, transforms):
+            vehicles.append(self._world.spawn_actor(vehicle, transform))
+        self._ego_vehicle = vehicles[0]
+
+        walker_bps = random.sample(bplib.filter('walker'), NUM_PEDESTRIANS)
+        transforms = random.sample(self._world.get_map().get_spawn_points(), NUM_PEDESTRIANS)
+        for walker, transform in zip(walker_bps, transforms):
+            self._world.spawn_actor(walker, transform)
+
+        # set sensors
+        camera_bp = bplib.find('sensor.camera.rgb')
+        camera_bp.set_attribute('image_size_x', str(WINDOW_WIDTH))
+        camera_bp.set_attribute('image_size_y', str(WINDOW_HEIGHT))
+        transform = carla.Transform(carla.Location(z=CAMERA_HEIGHT_POS))
+        self._rgb_camera = self._world.spawn_actor(camera_bp, transform, attach_to=self._ego_vehicle)
+        self._rgb_camera.listen(lambda image: image.save_to_disk(IMAGE_PATH.format(self.captured_frame_no), carla.ColorConverter.Raw))
+
+        lidar_bp = bplib.find('sensor.lidar.ray_cast')
+        lidar_bp.set_attribute('range', str(MAX_RENDER_DEPTH_IN_METERS))
+        lidar_bp.set_attribute('rotation_frequency', str(10))
+        lidar_bp.set_attribute('channels', str(40))
+        lidar_bp.set_attribute('points_per_second', str(720000))
+        lidar_bp.set_attribute('upper_fov', str(7))
+        lidar_bp.set_attribute('lower_fov', str(-16))
+        lidar_bp.set_attribute('rotation_frequency', str(1.0 / settings.fixed_delta_seconds))
+        transform = carla.Transform(carla.Location(z=LIDAR_HEIGHT_POS))
+        self._lidar = self._world.spawn_actor(lidar_bp, transform, attach_to=self._ego_vehicle)
+        self._lidar.listen(lambda point_cloud: point_cloud.save_to_disk(LIDAR_PATH.format(self.captured_frame_no)))
+
+        depth_camera_bp = bplib.find('sensor.camera.depth')
+        depth_camera_bp.set_attribute('image_size_x', str(WINDOW_WIDTH))
+        depth_camera_bp.set_attribute('image_size_y', str(WINDOW_HEIGHT))
+        depth_camera_bp.set_attribute('fov', str(90))
+        transform = carla.Transform(carla.Location(z=CAMERA_HEIGHT_POS))
+        depth_camera = self._world.spawn_actor(depth_camera_bp, transform, attach_to=self._ego_vehicle)
+        depth_camera.listen(self._on_depth_image)
+
+        # TODO: get camera intrinsics, lidar2ego, camera2ego
+    
+    def _on_depth_image(self, image):
+        self._depth_image = image
 
     def current_captured_frame_num(self):
         # Figures out which frame number we currently are on
@@ -170,13 +238,15 @@ class CarlaGame(object):
         self._on_new_episode()
 
     def _on_new_episode(self):
-        self._carla_settings.randomize_seeds()
-        self._carla_settings.randomize_weather()
-        scene = self.client.load_settings(self._carla_settings)
-        number_of_player_starts = len(scene.player_start_spots)
-        player_start = np.random.randint(number_of_player_starts)
+        # self._carla_settings.randomize_seeds()
+        # self._carla_settings.randomize_weather()
+        # scene = self.client.load_settings(self._carla_settings)
+        # number_of_player_starts = len(scene.player_start_spots)
+        # player_start = np.random.randint(number_of_player_starts)
+        # self.client.start_episode(player_start)
+
         logging.info('Starting new episode...')
-        self.client.start_episode(player_start)
+        self._reset_world()
         self._timer = Timer()
         self._is_on_reverse = False
 
@@ -187,7 +257,7 @@ class CarlaGame(object):
 
     def _on_loop(self):
         self._timer.tick()
-        measurements, sensor_data = self.client.read_data()
+        # measurements, sensor_data = self.client.read_data()
         # logging.info("Frame no: {}, = {}".format(self.captured_frame_no,
         #                                         (self.captured_frame_no + 1) % NUM_RECORDINGS_BEFORE_RESET))
         # Reset the environment if the agent is stuck or can't find any agents or if we have captured enough frames in this one
@@ -205,56 +275,50 @@ class CarlaGame(object):
         # (Extrinsic) Rt Matrix
         # (Camera) local 3d to world 3d.
         # Get the transform from the player protobuf transformation.
-        world_transform = Transform(
-            measurements.player_measurements.transform
-        )
+        ego_pose = self._ego_vehicle.get_transform()
         # Compute the final transformation matrix.
-        self._extrinsic = world_transform * self._camera_to_car_transform
-        self._measurements = measurements
-        self._last_player_location = measurements.player_measurements.transform.location
-        self._main_image = sensor_data.get('CameraRGB', None)
-        self._lidar_measurement = sensor_data.get('Lidar32', None)
-        self._depth_image = sensor_data.get('DepthCamera', None)
+        self._camera2world = self._rgb_camera.get_transform()
+        self._last_player_location = ego_pose.location
         # Print measurements every second.
-        if self._timer.elapsed_seconds_since_lap() > 1.0:
-            if self._city_name is not None:
-                # Function to get car position on map.
-                map_position = self._map.convert_to_pixel([
-                    measurements.player_measurements.transform.location.x,
-                    measurements.player_measurements.transform.location.y,
-                    measurements.player_measurements.transform.location.z])
-                # Function to get orientation of the road car is in.
-                lane_orientation = self._map.get_lane_orientation([
-                    measurements.player_measurements.transform.location.x,
-                    measurements.player_measurements.transform.location.y,
-                    measurements.player_measurements.transform.location.z])
+        # if self._timer.elapsed_seconds_since_lap() > 1.0:
+        #     if self._city_name is not None:
+        #         # Function to get car position on map.
+        #         map_position = self._map.convert_to_pixel([
+        #             measurements.player_measurements.transform.location.x,
+        #             measurements.player_measurements.transform.location.y,
+        #             measurements.player_measurements.transform.location.z])
+        #         # Function to get orientation of the road car is in.
+        #         lane_orientation = self._map.get_lane_orientation([
+        #             measurements.player_measurements.transform.location.x,
+        #             measurements.player_measurements.transform.location.y,
+        #             measurements.player_measurements.transform.location.z])
 
-                MeasurementsDisplayHelper.print_player_measurements_map(
-                    measurements.player_measurements,
-                    map_position,
-                    lane_orientation, self._timer)
-            else:
-                MeasurementsDisplayHelper.print_player_measurements(
-                    measurements.player_measurements, self._timer)
-            # Plot position on the map as well.
-            self._timer.lap()
+        #         MeasurementsDisplayHelper.print_player_measurements_map(
+        #             measurements.player_measurements,
+        #             map_position,
+        #             lane_orientation, self._timer)
+        #     else:
+        #         MeasurementsDisplayHelper.print_player_measurements(
+        #             measurements.player_measurements, self._timer)
+        #     # Plot position on the map as well.
+        #     self._timer.lap()
 
-        control = self._get_keyboard_control(pygame.key.get_pressed())
-        # Set the player position
-        if self._city_name is not None:
-            self._position = self._map.convert_to_pixel([
-                measurements.player_measurements.transform.location.x,
-                measurements.player_measurements.transform.location.y,
-                measurements.player_measurements.transform.location.z])
-            self._agent_positions = measurements.non_player_agents
+        # control = self._get_keyboard_control(pygame.key.get_pressed())
+        # # Set the player position
+        # if self._city_name is not None:
+        #     self._position = self._map.convert_to_pixel([
+        #         measurements.player_measurements.transform.location.x,
+        #         measurements.player_measurements.transform.location.y,
+        #         measurements.player_measurements.transform.location.z])
+        #     self._agent_positions = measurements.non_player_agents
 
-        if control is None:
-            self._on_new_episode()
-        elif self._enable_autopilot:
-            self.client.send_control(
-                measurements.player_measurements.autopilot_control)
-        else:
-            self.client.send_control(control)
+        # if control is None:
+        #     self._on_new_episode()
+        # elif self._enable_autopilot:
+        #     self.client.send_control(
+        #         measurements.player_measurements.autopilot_control)
+        # else:
+        #     self.client.send_control(control)
 
     def _get_keyboard_control(self, keys):
         """
@@ -312,7 +376,7 @@ class CarlaGame(object):
                 # print(self._camera_to_car_transform.matrix)
                 # Transform to camera space by the inverse of camera_to_car transform
                 point_cloud_cam = self._camera_to_car_transform.inverse().transform_points(point_cloud)
-                point_cloud_cam[:, 1] += LIDAR_HEIGHT_POS
+                point_cloud_cam[:, 1] boxes+= LIDAR_HEIGHT_POS
                 image = lidar_utils.project_point_cloud(
                     image, point_cloud_cam, self._intrinsic, 1)
 
@@ -507,7 +571,7 @@ def main():
 
     while True:
         try:
-            with make_carla_client(args.host, args.port) as client:
+            with carla.Client(str(args.host), int(args.port)) as client:
                 game = CarlaGame(client, args)
                 game.execute()
                 break

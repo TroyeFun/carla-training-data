@@ -1,5 +1,5 @@
 
-from carla.transform import Transform
+from carla import Transform
 import numpy as np
 
 from datadescriptor import KittiDescriptor
