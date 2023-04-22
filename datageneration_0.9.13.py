@@ -86,8 +86,10 @@ class CarlaGame(object):
         # set traffic
         bplib = self._world.get_blueprint_library()
         spawn_points = random.choices(self._world.get_map().get_spawn_points(), k=NUM_VEHICLES)
+        ego_vehicle_bp = bplib.find('vehicle.micro.microlino')
+        ego_vehicle_bp.set_attribute('role_name', 'hero')
         vehicle_bps = random.choices(list(bplib.filter('vehicle')), k=NUM_VEHICLES-1)
-        vehicle_bps = [bplib.find('vehicle.micro.microlino')] + vehicle_bps
+        vehicle_bps = [ego_vehicle_bp] + vehicle_bps
         self._vehicles = []
         for vehicle_bp, transform in zip(vehicle_bps, spawn_points):
             vehicle = self._world.try_spawn_actor(vehicle_bp, transform)
@@ -171,7 +173,8 @@ class CarlaGame(object):
             for _ in range(NUM_RECORDINGS_BEFORE_RESET):
                 self.tick()
         finally:
-            self.destroy_actors()
+            # self.destroy_actors()
+            pass
 
     def tick(self):
         self.frame_id += 1
