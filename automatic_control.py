@@ -155,6 +155,7 @@ class World(object):
         self.recording_enabled = False
         self.recording_start = 0
         self.frame_id = 0
+        self.player_poses = []
         self._pbar = tqdm(total=NUM_RECORDINGS_BEFORE_RESET)
 
     def restart(self, args, save_paths):
@@ -168,7 +169,7 @@ class World(object):
             light.set_green_time(1000.0)
 
         # setup traffic
-        self._setup_traffic()
+        self._setup_traffic(args)
 
         # Keep same camera config if the camera manager exists.
         cam_index = self.camera_manager.index if self.camera_manager is not None else 0
@@ -217,7 +218,7 @@ class World(object):
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
 
-    def _setup_traffic(self):
+    def _setup_traffic(self, args):
         # set vehicles
         bplib = self.world.get_blueprint_library()
         spawn_points = random.choice(self.world.get_map().get_spawn_points(), size=NUM_VEHICLES, replace=False)
@@ -225,7 +226,7 @@ class World(object):
         for vehicle_bp, transform in zip(vehicle_bps, spawn_points):
             vehicle = self.world.try_spawn_actor(vehicle_bp, transform)
             if vehicle:
-                vehicle.set_autopilot(True)
+                vehicle.set_autopilot(not args.static)
                 self.vehicles.append(vehicle)
         logging.info(f'{len(self.vehicles)} vehicles spawned')
 
@@ -275,6 +276,15 @@ class World(object):
         self.camera_manager.tick()
         self.frame_id += 1
         self._pbar.update(1)
+        self.player_poses.append(self.player.get_transform())
+    
+    def player_is_stuck(self):
+        if len(self.player_poses) < 10:
+            return False
+        distance = self.player_poses[-1].location.distance(self.player_poses[-10].location)
+        if distance < 0.3:
+            return True
+        return False
 
     def render(self, display):
         """Render world"""
@@ -896,7 +906,11 @@ def game_loop(args):
             world.render(display)
             pygame.display.flip()
 
-            if world.frame_id == NUM_RECORDINGS_BEFORE_RESET:
+            if world.frame_id + 1 == NUM_RECORDINGS_BEFORE_RESET:
+                break
+
+            if world.player_is_stuck():
+                print("The player has been stuck for 1 second, restarting...")
                 break
 
             if agent.done():
@@ -1010,10 +1024,10 @@ def main():
 
     try:
         while True:
-            print('\nStarting new episode...')
+            print(f'\nStart generating sequence {args.start_seq_id}...')
             game_loop(args)
             args.start_seq_id += 1
-            time.sleep(3.0)
+            time.sleep(1.0)
     except KeyboardInterrupt:
         print('\nCancelled by user. Bye!')
 
