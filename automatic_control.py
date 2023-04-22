@@ -279,7 +279,7 @@ class World(object):
         self.player_poses.append(self.player.get_transform())
     
     def player_is_stuck(self):
-        if len(self.player_poses) < 10:
+        if len(self.player_poses) < 30:
             return False
         distance = self.player_poses[-1].location.distance(self.player_poses[-10].location)
         if distance < 0.3:
@@ -910,7 +910,7 @@ def game_loop(args):
                 break
 
             if world.player_is_stuck():
-                print("The player has been stuck for 1 second, restarting...")
+                print("The player has been stuck for 3 second, restarting...")
                 break
 
             if agent.done():
