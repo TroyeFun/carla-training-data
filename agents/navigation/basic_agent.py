@@ -106,6 +106,15 @@ class BasicAgent(object):
         """Get method for protected member local planner"""
         return self._global_planner
 
+    def reset_start_location(self, start_location):
+        """
+        Sets the start location of the local planner to the given location.
+
+            :param start_location (carla.Location): start location
+        """
+        self._local_planner.clear_waypoints_queue()
+        self._local_planner.target_waypoint = self._map.get_waypoint(start_location)
+
     def set_destination(self, end_location, start_location=None):
         """
         This method creates a list of waypoints between a starting and ending location,
@@ -118,9 +127,10 @@ class BasicAgent(object):
         """
         if not start_location:
             start_location = self._local_planner.target_waypoint.transform.location
+            # start_location = self._vehicle.get_location()
             clean_queue = True
         else:
-            start_location = self._vehicle.get_location()
+            # start_location = self._vehicle.get_location()
             clean_queue = False
 
         start_waypoint = self._map.get_waypoint(start_location)

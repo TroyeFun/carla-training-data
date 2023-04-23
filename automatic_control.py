@@ -166,7 +166,7 @@ class World(object):
         # set all traffic light to green
         for light in self.world.get_actors().filter('traffic.traffic_light'):
             light.set_state(carla.TrafficLightState.Green)
-            light.set_green_time(1000.0)
+            light.set_green_time(10000.0)
 
         # setup traffic
         self._setup_traffic(args)
@@ -213,10 +213,21 @@ class World(object):
         self.camera_manager = CameraManager(self.player, self.hud)
         self.camera_manager.transform_index = cam_pos_id
         self.camera_manager.set_sensor(cam_index, notify=True)
-        self.camera_manager.add_record_sensor(CameraManager.RGB_CAMERA_INDEX, save_paths['image_path'])
-        self.camera_manager.add_record_sensor(CameraManager.LIDAR_INDEX, save_paths['lidar_path'])
+        self.camera_manager.set_record_paths(save_paths['image_path'], save_paths['lidar_path'])
+        self.camera_manager.add_record_sensor(CameraManager.RGB_CAMERA_INDEX)
+        self.camera_manager.add_record_sensor(CameraManager.LIDAR_INDEX)
         actor_type = get_actor_display_name(self.player)
         self.hud.notification(actor_type)
+
+    def close_pbar(self):
+        self._pbar.close()
+
+    def reset(self, save_paths):
+        self.frame_id = 0
+        self.player_poses.clear()
+        self.camera_manager.frame_id = 0
+        self.camera_manager.set_record_paths(save_paths['image_path'], save_paths['lidar_path'])
+        self._pbar = tqdm(total=NUM_RECORDINGS_BEFORE_RESET)
 
     def _setup_traffic(self, args):
         # set vehicles
@@ -278,10 +289,10 @@ class World(object):
         self._pbar.update(1)
         self.player_poses.append(self.player.get_transform())
     
-    def player_is_stuck(self):
-        if len(self.player_poses) < 30:
+    def player_is_stuck(self, num_frames=30):
+        if len(self.player_poses) < num_frames:
             return False
-        distance = self.player_poses[-1].location.distance(self.player_poses[-10].location)
+        distance = self.player_poses[-1].location.distance(self.player_poses[-num_frames].location)
         if distance < 0.3:
             return True
         return False
@@ -678,6 +689,7 @@ class CameraManager(object):
         self.sensor = None
         self.record_sensors = []
         self._record_queues = []
+        self._record_paths = {}
         self.surface = None
         self._parent = parent_actor
         self.hud = hud
@@ -724,12 +736,12 @@ class CameraManager(object):
                 blp.set_attribute('lower_fov', str(-16))
             item.append(blp)
         self.index = None
-        self._frame_id = 0
+        self.frame_id = 0
 
     def tick(self):
-        self._frame_id += 1
         for queue in self._record_queues:
             queue.get(block=True, timeout=3.0)
+        self.frame_id += 1
 
     def toggle_camera(self):
         """Activate a camera"""
@@ -759,7 +771,7 @@ class CameraManager(object):
             self.hud.notification(self.sensor_metas[index][2])
         self.index = index
 
-    def add_record_sensor(self, index, path_pattern):
+    def add_record_sensor(self, index):
         """Set a sensor"""
         sensor_type = self.sensor_metas[index][0]
         if sensor_type == 'sensor.camera.rgb':
@@ -776,11 +788,15 @@ class CameraManager(object):
         weak_self = weakref.ref(self)
         queue = Queue()
         if sensor_type == 'sensor.camera.rgb':
-            sensor.listen(lambda image: CameraManager._record_rgb_image(weak_self, image, path_pattern, queue))
+            sensor.listen(lambda image: CameraManager._record_rgb_image(weak_self, image, queue))
         elif sensor_type == 'sensor.lidar.ray_cast':
-            sensor.listen(lambda lidar_data: CameraManager._record_lidar_data(weak_self, lidar_data, path_pattern, queue))
+            sensor.listen(lambda lidar_data: CameraManager._record_lidar_data(weak_self, lidar_data, queue))
         self.record_sensors.append(sensor)
         self._record_queues.append(queue)
+
+    def set_record_paths(self, rgb_path, lidar_path):
+        self._record_paths['rgb'] = rgb_path
+        self._record_paths['lidar'] = lidar_path
 
     def next_sensor(self):
         """Get the next sensor"""
@@ -825,19 +841,19 @@ class CameraManager(object):
             image.save_to_disk('_out/%08d' % image.frame)
 
     @staticmethod
-    def _record_rgb_image(weak_self, image, path_pattern, queue):
+    def _record_rgb_image(weak_self, image, queue):
         self = weak_self()
-        image.save_to_disk(path_pattern.format(self._frame_id), carla.ColorConverter.Raw)
+        image.save_to_disk(self._record_paths['rgb'].format(self.frame_id), carla.ColorConverter.Raw)
         queue.put(True)
 
     @staticmethod
-    def _record_lidar_data(weak_self, lidar_data, path_pattern, queue):
+    def _record_lidar_data(weak_self, lidar_data, queue):
         self = weak_self()
         pcd_size = len(lidar_data)
         pcd = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.float32))
         pcd = np.reshape(pcd, (pcd_size, 4))
         pcd[:, 1] *= -1  # refer to save_lidar_data in dataexport.py
-        pcd.tofile(path_pattern.format(self._frame_id))
+        pcd.tofile(self._record_paths['lidar'].format(self.frame_id))
         queue.put(True)
 
 # ==============================================================================
@@ -893,6 +909,7 @@ def game_loop(args):
 
         clock = pygame.time.Clock()
 
+        num_episodes = 0
         while True:
             clock.tick()
             if args.sync:
@@ -906,21 +923,35 @@ def game_loop(args):
             world.render(display)
             pygame.display.flip()
 
-            if world.frame_id + 1 == NUM_RECORDINGS_BEFORE_RESET:
-                break
+            need_reset = False
+            if world.frame_id == NUM_RECORDINGS_BEFORE_RESET:
+                msg = "The number of recordings has reached the limit, set to new position"
+                need_reset = True
 
-            if world.player_is_stuck():
-                print("The player has been stuck for 3 second, restarting...")
-                break
+            if world.player_is_stuck(NUM_FRAMES_STUCK):
+                msg = f"The player has been stuck for {NUM_FRAMES_STUCK * settings.fixed_delta_seconds} seconds, set to new position"
+                need_reset = True
 
             if agent.done():
-                if args.loop:
-                    agent.set_destination(random.choice(spawn_points).location)
-                    world.hud.notification("The target has been reached, searching for another target", seconds=4.0)
-                    print("The target has been reached, searching for another target")
-                else:
-                    print("The target has been reached, stopping the simulation")
+                msg = "The target has been reached, searching for another target"
+                need_reset = True
+
+            if need_reset:
+                world.close_pbar()
+                print(msg)
+                num_episodes += 1
+                if num_episodes == NUM_EPISODES_BEFORE_RESTART:
+                    print('The number of episodes has reached the limit, restarting the world...')
                     break
+                start_point = random.choice(spawn_points)
+                world.player.set_transform(start_point)
+                agent.reset_start_location(start_point.location)
+                agent.set_destination(random.choice(spawn_points).location)
+
+                args.start_seq_id += 1
+                save_paths = create_save_dirs(args.start_seq_id)
+                print(f'\nStart generating sequence {args.start_seq_id}...')
+                world.reset(save_paths)
 
             control = agent.run_step()
             control.manual_gear_shift = False
@@ -989,11 +1020,11 @@ def main():
         metavar='PATTERN',
         default='vehicle.micro.*',
         help='Actor filter (default: "vehicle.*")')
-    argparser.add_argument(
-        '-l', '--loop',
-        action='store_true',
-        dest='loop',
-        help='Sets a new random destination upon reaching the previous one (default: False)')
+    # argparser.add_argument(
+    #     '-l', '--loop',
+    #     action='store_true',
+    #     dest='loop',
+    #     help='Sets a new random destination upon reaching the previous one (default: False)')
     argparser.add_argument(
         "-a", "--agent", type=str,
         choices=["Behavior", "Basic"],

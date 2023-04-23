@@ -13,10 +13,14 @@ VISIBLE_VERTEX_COLOR = (0, 255, 0)
 # How many meters the car must drive before a new capture is triggered.
 DISTANCE_SINCE_LAST_RECORDING = 10
 # How many datapoints to record before resetting the scene.
-NUM_RECORDINGS_BEFORE_RESET = 5000
-# How many frames to render before resetting the environment
+NUM_RECORDINGS_BEFORE_RESET = 500
+# How many frames to render before resetting the actor
 # For example, the agent may be stuck
 NUM_EMPTY_FRAMES_BEFORE_RESET = 100
+# How many episodes before resetting the environment
+NUM_EPISODES_BEFORE_RESTART = 20
+# How many frames to decide player as stuck
+NUM_FRAMES_STUCK = 30
 
 """ CARLA SETTINGS """
 CAMERA_HEIGHT_POS = 1.6
